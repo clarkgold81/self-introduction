@@ -434,16 +434,50 @@
     }
 
     // 아이콘 음성 재생
+    // 통합 오디오 재생 헬퍼 (에러 완벽 차단 및 TTS 폴백)
+    function playAudio(audioData, fallbackText) {
+      return new Promise((resolve) => {
+        // 데이터가 유효한지 확인 (최소 길이 100자 이상)
+        if (typeof audioData === 'string' && audioData.startsWith('data:audio') && audioData.length > 100) {
+          const audio = new Audio();
+          let isHandled = false;
+
+          const finish = (useFallback = false) => {
+            if (isHandled) return;
+            isHandled = true;
+            audio.pause();
+            audio.src = '';
+            if (useFallback) {
+              speakText(fallbackText).then(resolve);
+            } else {
+              resolve();
+            }
+          };
+
+          audio.onended = () => finish(false);
+          audio.onerror = () => finish(true);
+          
+          try {
+            audio.src = audioData;
+            const playPromise = audio.play();
+            if (playPromise !== undefined) {
+              playPromise.catch(() => finish(true));
+            }
+          } catch (e) {
+            finish(true);
+          }
+
+          // 5초 후에도 반응 없으면 강제 종료 (안전 장치)
+          setTimeout(() => finish(true), 5000);
+        } else {
+          speakText(fallbackText).then(resolve);
+        }
+      });
+    }
+
+    // 아이콘 음성 재생
     function playIconAudio(icon) {
-      const audioData = recordedAudios[icon.id];
-      if (audioData && audioData.startsWith('data:audio')) {
-        const audio = new Audio(audioData);
-        audio.play().catch(() => {
-          speakText(icon.name);
-        });
-      } else {
-        speakText(icon.name);
-      }
+      playAudio(recordedAudios[icon.id], icon.name);
     }
 
     // TTS 함수
@@ -617,19 +651,16 @@
     // 녹음된 음성 재생
     function playRecordedAudio() {
       const audioData = currentRecordingIconId ? recordedAudios[currentRecordingIconId] : null;
-      if (audioData && audioData.startsWith('data:audio')) {
-        const audio = new Audio(audioData);
-        audio.play();
-      }
+      const icon = iconData.find(i => i.id === currentRecordingIconId);
+      playAudio(audioData, icon ? icon.name : "");
     }
 
     // 교사 음성 재생
     function playTeacherAudio(part) {
-      let audioData = part === 'prefix' ? teacherPrefixAudio : teacherSuffixAudio;
-      if (audioData && audioData.startsWith('data:audio')) {
-        const audio = new Audio(audioData);
-        audio.play();
-      }
+      const audioData = part === 'prefix' ? teacherPrefixAudio : teacherSuffixAudio;
+      const cfg = JSON.parse(localStorage.getItem('self_intro_config') || JSON.stringify(defaultConfig));
+      const fallback = part === 'prefix' ? (cfg.sentence_prefix || defaultConfig.sentence_prefix) : (cfg.sentence_suffix || defaultConfig.sentence_suffix);
+      playAudio(audioData, fallback);
     }
 
     // 드롭 존 설정
@@ -783,42 +814,10 @@
       const prefix = cfg.sentence_prefix || defaultConfig.sentence_prefix;
       const suffix = cfg.sentence_suffix || defaultConfig.sentence_suffix;
 
-      // 교사 음성 앞부분 또는 TTS
-      if (teacherPrefixAudio && teacherPrefixAudio.startsWith('data:audio')) {
-        await new Promise((resolve) => {
-          const audio = new Audio(teacherPrefixAudio);
-          audio.onended = resolve;
-          audio.onerror = () => speakText(prefix).then(resolve);
-          audio.play().catch(() => speakText(prefix).then(resolve));
-        });
-      } else {
-        await speakText(prefix);
-      }
-
-      // 녹음된 학생 음성 또는 TTS
-      const studentAudio = recordedAudios[droppedIconId];
-      if (studentAudio && studentAudio.startsWith('data:audio')) {
-        await new Promise((resolve) => {
-          const audio = new Audio(studentAudio);
-          audio.onended = resolve;
-          audio.onerror = () => speakText(icon.name).then(resolve);
-          audio.play().catch(() => speakText(icon.name).then(resolve));
-        });
-      } else {
-        await speakText(icon.name);
-      }
-
-      // 교사 음성 뒷부분 또는 TTS
-      if (teacherSuffixAudio && teacherSuffixAudio.startsWith('data:audio')) {
-        await new Promise((resolve) => {
-          const audio = new Audio(teacherSuffixAudio);
-          audio.onended = resolve;
-          audio.onerror = () => speakText(suffix).then(resolve);
-          audio.play().catch(() => speakText(suffix).then(resolve));
-        });
-      } else {
-        await speakText(suffix);
-      }
+      // 단계별 순차 재생 (에러 발생 시 자동으로 TTS로 전환됨)
+      await playAudio(teacherPrefixAudio, prefix);
+      await playAudio(recordedAudios[droppedIconId], icon.name);
+      await playAudio(teacherSuffixAudio, suffix);
     }
 
     // 초기화
