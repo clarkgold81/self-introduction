@@ -219,6 +219,7 @@
     let currentTeacherRecordingPart = null;
     let mediaRecorder = null;
     let audioChunks = [];
+    let micStream = null; // 전역 마이크 스트림 유지용
     let droppedIconId = null;
 
     // 기본 설정
@@ -437,17 +438,21 @@
     // 통합 오디오 재생 헬퍼 (에러 완벽 차단 및 TTS 폴백)
     function playAudio(audioData, fallbackText) {
       return new Promise((resolve) => {
-        // 데이터가 유효한지 확인 (최소 길이 100자 이상)
-        if (typeof audioData === 'string' && audioData.startsWith('data:audio') && audioData.length > 100) {
+        // 데이터가 유효한지 확인 (브라우저마다 인코딩 방식이 다를 수 있음)
+        const isValidAudio = typeof audioData === 'string' && audioData.startsWith('data:audio');
+        
+        if (isValidAudio) {
+          console.log("재생 시도: 녹음된 목소리", fallbackText);
           const audio = new Audio();
           let isHandled = false;
 
-          const finish = (useFallback = false) => {
+          const finish = (useFallback = false, reason = "") => {
             if (isHandled) return;
             isHandled = true;
             audio.pause();
             audio.src = '';
             if (useFallback) {
+              console.warn(`녹음 재생 실패 (${reason}), 기계 음성으로 전환합니다:`, fallbackText);
               speakText(fallbackText).then(resolve);
             } else {
               resolve();
@@ -455,21 +460,22 @@
           };
 
           audio.onended = () => finish(false);
-          audio.onerror = () => finish(true);
+          audio.onerror = (e) => finish(true, "오디오 로드 에러");
           
           try {
             audio.src = audioData;
             const playPromise = audio.play();
             if (playPromise !== undefined) {
-              playPromise.catch(() => finish(true));
+              playPromise.catch((err) => finish(true, "재생 거부됨: " + err.message));
             }
           } catch (e) {
-            finish(true);
+            finish(true, "예외 발생: " + e.message);
           }
 
-          // 5초 후에도 반응 없으면 강제 종료 (안전 장치)
-          setTimeout(() => finish(true), 5000);
+          // 안전 장치 타이머 (문장이 길 수 있으므로 10초로 연장)
+          setTimeout(() => finish(true, "시간 초과"), 10000);
         } else {
+          console.log("녹음 데이터 없음, 기계 음성 재생:", fallbackText);
           speakText(fallbackText).then(resolve);
         }
       });
@@ -554,15 +560,40 @@
         mediaRecorder.stop();
         recordBtn.textContent = '🎤 녹음';
         recordBtn.classList.remove('recording');
+        console.log("녹음 중지 요청됨");
       } else {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          // 이미 스트림이 활성화되어 있다면 재사용, 없으면 요청
+          if (!micStream || !micStream.active) {
+            console.log("마이크 새 연결 요청 중...");
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            console.log("마이크 새 연결 성공:", micStream.id);
+          } else {
+            console.log("기존 마이크 연결 재사용");
+          }
+
           const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
-          mediaRecorder = new MediaRecorder(stream, { mimeType });
+          console.log("사용할 녹음 형식:", mimeType);
+
+          mediaRecorder = new MediaRecorder(micStream, { mimeType });
           audioChunks = [];
 
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+              audioChunks.push(e.data);
+              console.log(`데이터 청크 수신: ${e.data.size} bytes`);
+            }
+          };
+
           mediaRecorder.onstop = async () => {
+            console.log(`녹음 종료. 수신된 총 청크 수: ${audioChunks.length}`);
             const audioBlob = new Blob(audioChunks, { type: mimeType });
+            console.log(`생성된 오디오 블롭 크기: ${audioBlob.size} bytes`);
+
+            if (audioBlob.size < 1000) {
+              console.warn("녹음된 데이터가 너무 적습니다. 마이크 연결을 확인하세요.");
+            }
+
             const audioBase64 = await blobToBase64(audioBlob);
             recordedAudios[currentRecordingIconId] = audioBase64;
             localStorage.setItem('self_intro_audios', JSON.stringify(recordedAudios));
@@ -577,12 +608,13 @@
             document.getElementById('status-recorded').classList.remove('hidden');
             document.getElementById('play-recorded-btn').classList.remove('hidden');
 
-            stream.getTracks().forEach(track => track.stop());
-
-            showToast('녹음이 완료되었어요! 🎉');
+            // 스트림을 여기서 멈추지 않고 유지하여 반복 요청을 방지합니다.
+            // stream.getTracks().forEach(track => track.stop());
+            showToast('녹음이 저장되었어요! 🎉');
           };
 
           mediaRecorder.start();
+          console.log("MediaRecorder 시작됨");
 
           document.getElementById('status-ready').classList.add('hidden');
           document.getElementById('status-recording').classList.remove('hidden');
@@ -592,6 +624,7 @@
           recordBtn.classList.add('recording');
 
         } catch (err) {
+          console.error("마이크 접근 실패:", err);
           showToast('마이크 접근 권한이 필요해요 🎤');
         }
       }
@@ -603,18 +636,35 @@
 
       if (mediaRecorder && mediaRecorder.state === 'recording') {
         mediaRecorder.stop();
-        recordBtn.textContent = part === 'prefix' ? '🎤 녹음' : '🎤 녹음';
+        recordBtn.textContent = '🎤 녹음';
         recordBtn.classList.remove('recording');
+        console.log(`교사 ${part} 녹음 중지 요청됨`);
       } else {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          // 마이크 스트림 재사용
+          if (!micStream || !micStream.active) {
+            console.log("교사용 마이크 새 연결 요청 중...");
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          } else {
+            console.log("교사용 기존 마이크 연결 재사용");
+          }
+
           const mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : 'audio/mp4';
-          mediaRecorder = new MediaRecorder(stream, { mimeType });
+          mediaRecorder = new MediaRecorder(micStream, { mimeType });
           audioChunks = [];
           currentTeacherRecordingPart = part;
 
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) {
+              audioChunks.push(e.data);
+            }
+          };
+
           mediaRecorder.onstop = async () => {
+            console.log(`교사 ${part} 녹음 종료. 수신된 총 청크 수: ${audioChunks.length}`);
             const audioBlob = new Blob(audioChunks, { type: mimeType });
+            console.log(`생성된 오디오 블롭 크기: ${audioBlob.size} bytes`);
+
             const audioBase64 = await blobToBase64(audioBlob);
 
             if (part === 'prefix') {
@@ -633,16 +683,17 @@
             };
             localStorage.setItem('self_intro_teacher_audio', JSON.stringify(teacherData));
 
-            stream.getTracks().forEach(track => track.stop());
             showToast('교사 음성이 저장되었어요! 🎉');
           };
 
           mediaRecorder.start();
+          console.log(`교사 ${part} MediaRecorder 시작됨`);
 
-          recordBtn.textContent = part === 'prefix' ? '⏹️ 중지' : '⏹️ 중지';
+          recordBtn.textContent = '⏹️ 중지';
           recordBtn.classList.add('recording');
 
         } catch (err) {
+          console.error("교사 마이크 접근 실패:", err);
           showToast('마이크 접근 권한이 필요해요 🎤');
         }
       }
