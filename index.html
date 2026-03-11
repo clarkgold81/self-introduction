@@ -435,8 +435,9 @@
 
     // 아이콘 음성 재생
     function playIconAudio(icon) {
-      if (recordedAudios[icon.id]) {
-        const audio = new Audio(recordedAudios[icon.id]);
+      const audioData = recordedAudios[icon.id];
+      if (audioData && audioData.startsWith('data:audio')) {
+        const audio = new Audio(audioData);
         audio.play().catch(() => {
           speakText(icon.name);
         });
@@ -615,19 +616,18 @@
 
     // 녹음된 음성 재생
     function playRecordedAudio() {
-      if (currentRecordingIconId && recordedAudios[currentRecordingIconId]) {
-        const audio = new Audio(recordedAudios[currentRecordingIconId]);
+      const audioData = currentRecordingIconId ? recordedAudios[currentRecordingIconId] : null;
+      if (audioData && audioData.startsWith('data:audio')) {
+        const audio = new Audio(audioData);
         audio.play();
       }
     }
 
     // 교사 음성 재생
     function playTeacherAudio(part) {
-      if (part === 'prefix' && teacherPrefixAudio) {
-        const audio = new Audio(teacherPrefixAudio);
-        audio.play();
-      } else if (part === 'suffix' && teacherSuffixAudio) {
-        const audio = new Audio(teacherSuffixAudio);
+      let audioData = part === 'prefix' ? teacherPrefixAudio : teacherSuffixAudio;
+      if (audioData && audioData.startsWith('data:audio')) {
+        const audio = new Audio(audioData);
         audio.play();
       }
     }
@@ -784,7 +784,7 @@
       const suffix = cfg.sentence_suffix || defaultConfig.sentence_suffix;
 
       // 교사 음성 앞부분 또는 TTS
-      if (teacherPrefixAudio) {
+      if (teacherPrefixAudio && teacherPrefixAudio.startsWith('data:audio')) {
         await new Promise((resolve) => {
           const audio = new Audio(teacherPrefixAudio);
           audio.onended = resolve;
@@ -796,9 +796,10 @@
       }
 
       // 녹음된 학생 음성 또는 TTS
-      if (recordedAudios[droppedIconId]) {
+      const studentAudio = recordedAudios[droppedIconId];
+      if (studentAudio && studentAudio.startsWith('data:audio')) {
         await new Promise((resolve) => {
-          const audio = new Audio(recordedAudios[droppedIconId]);
+          const audio = new Audio(studentAudio);
           audio.onended = resolve;
           audio.onerror = () => speakText(icon.name).then(resolve);
           audio.play().catch(() => speakText(icon.name).then(resolve));
@@ -808,7 +809,7 @@
       }
 
       // 교사 음성 뒷부분 또는 TTS
-      if (teacherSuffixAudio) {
+      if (teacherSuffixAudio && teacherSuffixAudio.startsWith('data:audio')) {
         await new Promise((resolve) => {
           const audio = new Audio(teacherSuffixAudio);
           audio.onended = resolve;
